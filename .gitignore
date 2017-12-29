@@ -1,0 +1,6 @@
+.idea/
+.DS_Store
+venv/
+cookies/
+src/credentials.py
+*.pyc
