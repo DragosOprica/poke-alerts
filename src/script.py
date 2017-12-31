@@ -1,107 +1,93 @@
 import logging
+import re
 import time
-from datetime import datetime
 from urllib import parse
 
-import editdistance
 import os
-import re
 import requests
-from collections import defaultdict
 from geopy import distance
-from twitter import TwitterError
 
 from src.clients.apple_client import AppleClient
+from src.clients.discord_client import DiscordClient
 from src.clients.fb_client import FbClient
 from src.clients.twitter_client import TwitterClient
 
 if os.path.isfile('./src/credentials.py'):
-    from src.credentials import POKEMON_FEEDS, IPHONE_NAME
+    from src.credentials import POKEMON_LIST
 else:
-    POKEMON_FEEDS = ['TWITTER_SCREEN_NAME']
-    IPHONE_NAME = 'DEVICE_NAME'
+    POKEMON_LIST = ['POKEMON_NAME']
 
-SLEEP_SECS = 5 * 60
-MAX_MILES_DISTANCE = 10.0
-MAX_SIMILAR_TWEET = 10
+SLEEP_SECS = 60
+MAX_MILES_DISTANCE = 0.5
+MIN_DISTANCE_FEET = 5
 
 log = logging.getLogger('src.script')
 
 
-def get_pokemon_tweets(twitter_client, since_pokemon_tweet, max_pokemon_tweet):
-    def new_enough(tweet, now):
-        tweet_time = datetime.fromtimestamp(tweet.created_at_in_seconds)
-        return (now - tweet_time).total_seconds() < SLEEP_SECS
-
-    all_tweets = []
-    for screen_name in POKEMON_FEEDS:
-        while True:
-            log.warning('Fetching tweets for screen_name: {} with max_id: {} and since_id: {}'.format(
-                screen_name, max_pokemon_tweet[screen_name], since_pokemon_tweet[screen_name]))
-            try:
-                tweets = twitter_client.GetUserTimeline(screen_name=screen_name,
-                                                        max_id=max_pokemon_tweet[screen_name],
-                                                        since_id=since_pokemon_tweet[screen_name],
-                                                        count=200)
-            except TwitterError as e:
-                log.warning('Failed to fetch tweets for screen_name: {} with max_id: {} and since_id: {}'.format(
-                    screen_name, max_pokemon_tweet[screen_name], since_pokemon_tweet[screen_name]), exc_info=True)
-                tweets = []
-
-            if not tweets:
-                log.warning('No more tweets for screen_name: {}'.format(screen_name))
-                break
-            max_pokemon_tweet[screen_name] = min([tweet.id for tweet in tweets])
-            since_pokemon_tweet[screen_name] = max([tweet.id for tweet in tweets])
-
-            log.warning('Successfully fetched {} tweets'.format(len(tweets)))
-            now = datetime.now()
-            tweets = [tweet for tweet in tweets if new_enough(tweet, now)]
-            if not tweets:
-                log.warning('No more recent tweets for screen_name: {}'.format(screen_name))
-                break
-            else:
-                log.warning('Finalized tweet filter by recent time. Got {} for screen_name: {}'.format(
-                    len(tweets), screen_name))
-            all_tweets.extend(tweets)
-
-    return all_tweets
-
-
-def extract_location(location):
-    return location['latitude'], location['longitude']
-
-
 def filter_tweets_by_location(tweets, location):
-    def fetch_pokemon_location_from_tweet(poke_tweet):
+    def fetch_pokemon_location(poke_tweet):
         urls = re.findall('(?P<url>https?://[^\s]+)', poke_tweet.text)
 
         for url in urls:
             resp = requests.head(url=url)
-            yield tuple(parse.parse_qs(parse.urlparse(resp.headers['location']).query)['q'])
+            try:
+                return parse.parse_qs(parse.urlparse(resp.headers['location']).query)['q'][0]
+            except Exception as e:
+                log.warning('Failed to parse location for url {}'.format(url), exc_info=True)
+        return ['0, 0']
 
     filtered_tweets = set()
     for tweet in tweets:
-        for pokemon_location in fetch_pokemon_location_from_tweet(tweet):
-            if distance.distance(location, pokemon_location).miles < MAX_MILES_DISTANCE:
-                filtered_tweets.add(tweet.text)
+        pokemon_location = fetch_pokemon_location(tweet)
+        if distance.distance(location, pokemon_location).miles < MAX_MILES_DISTANCE:
+            filtered_tweets.add((pokemon_location, tweet.text))
 
     return filtered_tweets
 
 
-def merge_same_pokemon(tweets):
-    filtered_tweets = []
-    for tested_tweet in tweets:
-        if not any([editdistance.eval(tested_tweet, tweet) <= MAX_SIMILAR_TWEET
-                    for tweet in tweets if tweet != tested_tweet]):
-            filtered_tweets.append(tested_tweet)
+def filter_discord_messages_by_location(messages, location):
+    def fetch_pokemon_location(message):
+        try:
+            return parse.parse_qs(parse.urlparse(message['embeds'][0]['url']).query)['q'][0]
+        except Exception as e:
+            log.warning('Failed to parse location for message {}'.format(message), exc_info=True)
+            return ['0, 0']
 
-    return filtered_tweets
+    filtered_messages = set()
+    for message in messages:
+        pokemon_location = fetch_pokemon_location(message)
+        if distance.distance(location, pokemon_location).miles < MAX_MILES_DISTANCE:
+            try:
+                filtered_messages.add((pokemon_location,
+                                       message['embeds'][0]['title'] + '\n' + message['embeds'][0]['description']))
+            except (KeyError, TypeError) as e:
+                log.warning('Failed to parse message text for message {}'.format(message), exc_info=True)
+
+    return filtered_messages
+
+
+def merge_same_pokemon(pokemons):
+    def same_poke(loc_a, loc_b, text_a, text_b):
+        if distance.distance(loc_a, loc_b).feet > MIN_DISTANCE_FEET:
+            return False
+
+        candidate_a = [pokemon for pokemon in POKEMON_LIST if pokemon.lower() in text_a.lower()][0]
+        candidate_b = [pokemon for pokemon in POKEMON_LIST if pokemon.lower() in text_b.lower()][0]
+        if candidate_a != candidate_b:
+            return False
+
+        return True
+
+    filtered_pokemons = []
+    for current_location, current_text in pokemons:
+        if not any([same_poke(current_location, filtered_location, current_text, filtered_text)
+                    for filtered_location, filtered_text in filtered_pokemons]):
+            filtered_pokemons.append((current_location, current_text))
+
+    return [text for _, text in filtered_pokemons]
 
 
 def main():
-    last_pokemon_tweet = defaultdict(int)
-
     log.warning('Logging in to Facebook Messenger!')
     fb_client = FbClient()
     log.warning('----------------------------------------------------------------------------')
@@ -114,24 +100,36 @@ def main():
     twitter_client = TwitterClient()
     log.warning('----------------------------------------------------------------------------')
 
+    log.warning('Logging in to Discord!')
+    discord_client = DiscordClient()
+    log.warning('----------------------------------------------------------------------------')
+
     while True:
         log.warning('Another iteration!')
         log.warning('----------------------------------------------------------------------------')
-
-        tweets = get_pokemon_tweets(twitter_client, last_pokemon_tweet, defaultdict(int))
+        tweets = twitter_client.get_pokemon_tweets()
         log.warning('Got {} tweets for this iteration!'.format(len(tweets)))
+        log.warning('----------------------------------------------------------------------------')
+        messages = discord_client.get_pokemon_messages()
+        log.warning('Got {} discord messages for this iteration!'.format(len(messages)))
+        log.warning('----------------------------------------------------------------------------')
+        location = apple_client.get_location()
 
+        pokemons = []
         if tweets:
-            tweets = filter_tweets_by_location(tweets, extract_location(apple_client.get_location(IPHONE_NAME)))
-            log.warning('Got {} location (close to you) filtered tweets for this iteration!'.format(len(tweets)))
+            local_pokemon = filter_tweets_by_location(tweets, location)
+            pokemons.extend(local_pokemon)
+            log.warning('Got {} location filtered tweets for this iteration!'.format(len(local_pokemon)))
+        if messages:
+            local_pokemon = filter_discord_messages_by_location(messages, location)
+            pokemons.extend(local_pokemon)
+            log.warning('Got {} location filtered messages for this iteration!'.format(len(local_pokemon)))
 
-        if tweets:
-            tweets = merge_same_pokemon(tweets)
-            log.warning('Got {} merged (same pokemon) filtered tweets for this iteration!'.format(len(tweets)))
-
-        if tweets:
-            for tweet in tweets:
-                fb_client.send_message_to_poke_thread(tweet)
+        if pokemons:
+            pokemons = merge_same_pokemon(pokemons)
+            log.warning('Got {} merged filtered tweets for this iteration!'.format(len(pokemons)))
+            for pokemon in pokemons:
+                fb_client.send_message_to_poke_thread(pokemon)
             log.warning('Sent Facebook notifications (to your group) for all nearby pokemon!')
 
         time.sleep(SLEEP_SECS)
@@ -139,4 +137,10 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    while True:
+        try:
+            log.warning('Starting script!')
+            main()
+        except Exception:
+            log.warning('Script failed! Will restart!', exc_info=True)
+            time.sleep(SLEEP_SECS * 5)

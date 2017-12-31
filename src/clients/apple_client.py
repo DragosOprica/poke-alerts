@@ -1,17 +1,17 @@
 import time
 
 import os
-
 from pyicloud import PyiCloudService
 from pyicloud.exceptions import PyiCloudFailedLoginException
 from src.clients.fb_client import FbClient
 
 if os.path.isfile('./src/credentials.py'):
-    from src.credentials import APPLE_EMAIL, APPLE_PASSWORD, APPLE_COOKIE_DIRECTORY
+    from src.credentials import APPLE_EMAIL, APPLE_PASSWORD, APPLE_COOKIE_DIRECTORY, IPHONE_NAME
 else:
     APPLE_EMAIL = 'EMAIL@DOMAIN.COM'
     APPLE_PASSWORD = 'PASSWORD'
     APPLE_COOKIE_DIRECTORY = './PATH/TO/DIR'
+    IPHONE_NAME = 'DEVICE_NAME'
 
 SLEEP_SECS = 60
 
@@ -37,7 +37,8 @@ class AppleClient(PyiCloudService):
             if not self.validate_verification_code(self.trusted_devices[0], codes_2fa[0].replace(' ', '')):
                 raise PyiCloudFailedLoginException('Failed to validate 2FA code!')
 
-    def get_location(self, device_name=''):
+    def get_location(self):
         self.authenticate()
-        devices = [device for device in self.devices if device_name in device['name']]
-        return devices[0].location()
+        devices = [device for device in self.devices if IPHONE_NAME in device['name']]
+        location = devices[0].location()
+        return location['latitude'], location['longitude']

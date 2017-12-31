@@ -1,7 +1,7 @@
 import json
 import time
-import os
 
+import os
 from fbchat import Client, ThreadType
 
 if os.path.isfile('./src/credentials.py'):
