@@ -30,7 +30,7 @@ class TwitterClient(Api):
         kwargs['access_token_secret'] = TWITTER_API_ACCESS_TOKEN_SECRET
         super(TwitterClient, self).__init__(**kwargs)
         self.feeds = TWITTER_POKEMON_FEEDS
-        self.ttl = kwargs.get('ttl', SLEEP_SECS)
+        self.ttl = kwargs.get('ttl', 2 * SLEEP_SECS)
         self.since_pokemon_tweet = defaultdict(int)
 
     def _new_enough(self, tweet, now):

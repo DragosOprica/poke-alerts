@@ -15,7 +15,7 @@ else:
 
 log = logging.getLogger('client.discord_client')
 SLEEP_SECS = 60
-MAX_MESSAGES_PER_REQUEST = 100
+MAX_MESSAGES_PER_REQUEST = 50
 
 
 class DiscordClient(object):
@@ -34,7 +34,7 @@ class DiscordClient(object):
         self.token = DISCORD_API_TOKEN
         self.channels = DISCORD_CHANNELS
         self._login()
-        self.ttl = kwargs.get('ttl', SLEEP_SECS)
+        self.ttl = kwargs.get('ttl', 2 * SLEEP_SECS)
         self.since_pokemon_message = defaultdict(int)
 
     def _login(self):
